@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>App Conductor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        #map { height: 100vh; width: 100%; z-index: 1; background-color: #e5e7eb; }
+        .ui-element { z-index: 1000; }
+        .pulse-marker {
+            background-color: #3b82f6; width: 20px; height: 20px; border-radius: 50%;
+            border: 3px solid white; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7);
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+            70% { transform: scale(1); box-shadow: 0 0 0 15px rgba(59, 130, 246, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+        }
+    </style>
+</head>
+<body class="relative overflow-hidden bg-gray-100 font-sans">
+    <div id="map" class="absolute inset-0"></div>
+
+    <div class="absolute top-0 left-0 right-0 bg-white shadow-md rounded-b-3xl p-4 pt-8 ui-element">
+        <div class="flex justify-between items-center mb-4">
+            <div class="flex items-center gap-3">
+                <div class="w-12 h-12 bg-gray-300 rounded-full border-2 border-gray-800 overflow-hidden">
+                    <img src="https://api.dicebear.com/7.x/avataaars/svg?seed=Crespo" alt="Perfil" class="w-full h-full object-cover">
+                </div>
+                <div>
+                    <p class="text-sm text-gray-500 font-semibold">Conexión</p>
+                    <p id="socketStatus" class="text-xs font-bold text-red-600">Desconectado</p>
+                </div>
+            </div>
+        </div>
+        <button id="toggleStatusBtn" onclick="window.toggleStatus()" class="w-full bg-red-600 text-white font-bold text-lg py-3 rounded-xl shadow-md transition-colors duration-300">
+            Modo Offline - Toca para Iniciar
+        </button>
+    </div>
+
+    <!-- Alerta de Viaje -->
+    <div id="rideRequestAlert" class="absolute bottom-[-100%] left-0 right-0 bg-white rounded-t-3xl shadow-[0_-10px_20px_-5px_rgba(0,0,0,0.2)] p-6 ui-element transition-all duration-500 z-[1500]">
+        <div class="flex justify-center mb-2"><span class="bg-green-100 text-green-800 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wide animate-pulse">¡Nueva Solicitud!</span></div>
+        <div class="flex justify-between items-center border-b border-gray-100 pb-4 mb-4">
+            <div><p id="precioViaje" class="text-3xl font-bold text-gray-900">S/ 0.00</p></div>
+            <div class="text-right"><p id="distanciaViaje" class="text-lg font-bold">0 km</p></div>
+        </div>
+        <div class="flex gap-3">
+            <button onclick="window.rechazarViaje()" class="w-1/3 bg-gray-200 text-gray-800 font-bold text-lg py-4 rounded-xl">Ignorar</button>
+            <button onclick="window.aceptarViaje()" class="w-2/3 bg-green-600 text-white font-bold text-lg py-4 rounded-xl shadow-md">Aceptar</button>
+        </div>
+    </div>
+
+    <script>
+        // IMPORTANTE: Cambia 'http://localhost:3000' por la URL pública de Render una vez desplegado
+        const socket = io('http://localhost:3000'); 
+        
+        let map, driverMarker;
+        let isOnline = false, watchId = null;
+        let currentUbicacion = { lat: -7.6226, lng: -78.0467 }; 
+
+        socket.on('connect', () => {
+            document.getElementById('socketStatus').innerText = "Servidor Conectado";
+            document.getElementById('socketStatus').className = "text-xs font-bold text-green-600";
+        });
+        
+        socket.on('disconnect', () => {
+            document.getElementById('socketStatus').innerText = "Desconectado";
+            document.getElementById('socketStatus').className = "text-xs font-bold text-red-600";
+            if (isOnline) window.toggleStatus();
+        });
+
+        socket.on('nueva_solicitud', (datosViaje) => {
+            if (!isOnline) return;
+            document.getElementById('precioViaje').innerText = `S/ ${datosViaje.precio}`;
+            document.getElementById('distanciaViaje').innerText = `${datosViaje.distancia} km`;
+            document.getElementById('rideRequestAlert').style.bottom = "0";
+        });
+
+        window.toggleStatus = function() {
+            const btn = document.getElementById('toggleStatusBtn');
+            isOnline = !isOnline;
+
+            if (isOnline) {
+                btn.className = "w-full bg-green-600 text-white font-bold text-lg py-3 rounded-xl shadow-md";
+                btn.innerText = "Modo Online - Buscando viajes...";
+                socket.emit('estado_online', currentUbicacion);
+                iniciarRastreoGPS();
+            } else {
+                btn.className = "w-full bg-red-600 text-white font-bold text-lg py-3 rounded-xl shadow-md";
+                btn.innerText = "Modo Offline - Toca para Iniciar";
+                socket.emit('estado_offline');
+                detenerRastreoGPS();
+                document.getElementById('rideRequestAlert').style.bottom = "-100%";
+            }
+        };
+
+        function iniciarRastreoGPS() {
+            if (navigator.geolocation) {
+                watchId = navigator.geolocation.watchPosition((position) => {
+                    currentUbicacion.lat = position.coords.latitude;
+                    currentUbicacion.lng = position.coords.longitude;
+                    if (driverMarker) {
+                        driverMarker.setLatLng([currentUbicacion.lat, currentUbicacion.lng]);
+                        map.panTo(new L.LatLng(currentUbicacion.lat, currentUbicacion.lng));
+                    }
+                    socket.emit('actualizar_ubicacion', currentUbicacion);
+                }, (error) => console.error("Error GPS:", error), { enableHighAccuracy: true, maximumAge: 0 });
+            }
+        }
+
+        function detenerRastreoGPS() {
+            if (watchId !== null) {
+                navigator.geolocation.clearWatch(watchId);
+                watchId = null;
+            }
+        }
+
+        window.aceptarViaje = () => { socket.emit('viaje_aceptado'); document.getElementById('rideRequestAlert').style.bottom = "-100%"; };
+        window.rechazarViaje = () => { document.getElementById('rideRequestAlert').style.bottom = "-100%"; };
+
+        window.onload = function() {
+            map = L.map('map', { zoomControl: false }).setView([currentUbicacion.lat, currentUbicacion.lng], 16);
+            L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+                attribution: '© Esri'
+            }).addTo(map);
+            const driverIcon = L.divIcon({ className: 'pulse-marker', iconSize: [20, 20], iconAnchor: [10, 10] });
+            driverMarker = L.marker([currentUbicacion.lat, currentUbicacion.lng], {icon: driverIcon}).addTo(map);
+        };
+    </script>
+</body>
+</html>
